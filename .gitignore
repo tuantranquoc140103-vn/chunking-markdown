@@ -5,3 +5,10 @@
 obj
 bin
 
+#python
+python_code/.venv
+python_code/__pycache__
+
+.env
+
+Test.cs

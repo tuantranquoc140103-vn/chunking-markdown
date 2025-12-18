@@ -1,104 +1,102 @@
-﻿using System.Text;
-using Markdig;
-using Markdig.Syntax;
-using static Unit;
+﻿using System.ClientModel;
+using System.ClientModel.Primitives;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Text.Json.Schema;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
+using OpenAI;
+using OpenAI.Chat;
+using DotNetEnv;
+using Microsoft.Extensions.Configuration;
 
-FileService fileService = new FileService(@".\data");
-
-string pathFileMarkdown = @"example2.md";
-
-string contentMarkdown = fileService.ReadFile(pathFileMarkdown).Result;
-string smallContentMarkdown = contentMarkdown.Length > 1000 ? contentMarkdown[..1000] : contentMarkdown;
-
-// Console.WriteLine(smallContentMarkdown);
-
-var pipelineMarkdown = new MarkdownPipelineBuilder()
-                            .UsePipeTables()
-                            .UseEmphasisExtras()
-                            .Build();
-
-MarkdownDocument document = Markdown.Parse(contentMarkdown, pipelineMarkdown);
-// MarkdownDocument document = Markdown.Parse(smallContentMarkdown, pipelineMarkdown);
-
-List<HeadingBlock> chunkHeaders = new List<HeadingBlock>();
-List<Block> chunkTables = new List<Block>();
-List<string> listChunkParagraph = new List<string>();
+Env.Load();
 
 
-// int index = 0;
+HostApplicationBuilder builder = Host.CreateApplicationBuilder(args);
 
-HeadingBlock? beforHeaderBlock = null;  
+builder.Configuration.AddJsonFile("appsettings.json", optional: false, reloadOnChange: true);
 
-foreach(Block block in document)
+builder.Configuration.AddEnvironmentVariables();
+
+builder.Services.AddSingleton<JsonSerializerOptions>( sp =>
 {
-    if(block is HeadingBlock headingBlock)
+    var options = new JsonSerializerOptions
     {
-        chunkHeaders.Add(headingBlock);
-        if(beforHeaderBlock is null)
-        {
-            string content = MarkdownHelper.GetContentBetweenHeader(beforHeaderBlock, headingBlock, contentMarkdown);
-            listChunkParagraph.Add(content.Trim());
-            
-        }
-        else if (beforHeaderBlock.Level < headingBlock.Level)
-        {
-            string content = MarkdownHelper.GetContentBetweenHeader(beforHeaderBlock, headingBlock, contentMarkdown);
-            listChunkParagraph.Add(content.Trim());
-            
-        }
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
+        WriteIndented = true,
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver()
+    };
 
-        beforHeaderBlock = headingBlock;
-        
-        
-    }
-    else if(block is HtmlBlock htmlBlock && Unit.MarkdownHelper.IsTableBlock(htmlBlock))
+    options.Converters.Add(new JsonStringEnumConverter(JsonNamingPolicy.CamelCase));
+
+    return options;
+});
+
+// Service
+builder.Services.AddKeyedSingleton<ChatClient>(LlmProvider.Vllm, (sp, key) =>
     {
-        chunkTables.Add(block);
-    }
-}
-
-int i=0;
-foreach(var item in listChunkParagraph)
+        LlmOption llmOption = builder.Configuration.GetRequiredSection("LlmProvider:Vllm").Get<LlmOption>() ?? throw new ArgumentNullException("LlmProvider:Vllm is missing in appsettings.json");  
+        var options = new OpenAIClientOptions { Endpoint = new Uri(llmOption.BaseUrl) };
+        var client = new OpenAIClient(new ApiKeyCredential(llmOption.ApiKey ?? "no-api-key"), options);
+        return client.GetChatClient(llmOption.ModelName);
+    });
+builder.Services.AddKeyedSingleton<ChatClient>(LlmProvider.Nvidia, (sp, key) =>
 {
-    if(i == 10)
+    LlmOption llmOption = builder.Configuration.GetRequiredSection("LlmProvider:Nvidia").Get<LlmOption>() ?? throw new ArgumentNullException("LlmProvider:Nvidia is missing in appsettings.json");  
+    if(string.IsNullOrEmpty(llmOption.ApiKey)) throw new ArgumentNullException("LlmProvider:Nvidia ApiKey is missing in appsettings.json or env file");
+    var client = new ChatClient(
+        model: llmOption.ModelName,
+        credential: new ApiKeyCredential(llmOption.ApiKey),
+        options: new OpenAIClientOptions { Endpoint = new Uri(llmOption.BaseUrl) }
+    );
+    return client;
+});
+builder.Services.AddHttpClient<TokenCountService>(
+    client =>
     {
-        break;
+        string url = builder.Configuration.GetRequiredSection("TokenCountService:BaseUrl").Value ?? throw new ArgumentNullException("TokenCountService:BaseUrl Key is missing in env file or appsettings.json");
+        client.BaseAddress = new Uri(url);
+        client.DefaultRequestHeaders.Add("Accept", "application/json");      
     }
-    i++;
-    // if(item.Length > 50)
-    // {
-    //     Console.WriteLine(item[..50]);
-    // }
-    // else
-    // {
-    //     Console.WriteLine(item);
-    // }
-    // Console.WriteLine(new string('-', 20));
-}
+);
+builder.Services.AddScoped<MarkdownService>();
 
-var contentHeader1s = Unit.MarkdownHelper.CreateContentBelongtoHeader(contentMarkdown, chunkHeaders, 1);
-// var contentHeader2s = Unit.MarkdownHelper.CreateContentBelongtoHeader(contentMarkdown, chunkHeaders, 2);
-// var contentHeader3s = Unit.MarkdownHelper.CreateContentBelongtoHeader(contentMarkdown, chunkHeaders, 3);
+// Adapter
+builder.Services.AddScoped<NvidiaAdapter>();
+builder.Services.AddScoped<VllmAdapter>();
 
-// Console.WriteLine($"contentHeader1s count: {contentHeader1s.Count}");
+// Factory
+builder.Services.AddSingleton<ILlmFactory, LlmFactory>();
+builder.Services.AddSingleton<ILlmAdapterFactory, LlmAdapterFactory>();
 
-// int i = 0;
-// Console.WriteLine($"contentHeader2s count: {contentHeader2s.Count}");
-// foreach(var item in contentHeader2s)
-// {
-//     // Console.WriteLine(new string('-', 20));
-//     // Console.WriteLine(item.Value);
-//     int lengthWord = item.Value.Split(' ').Length;
-//     Console.WriteLine($"Count words at index {i++}: {lengthWord}");
-//     if(lengthWord > 8192)
-//     {
-//         Console.WriteLine("\t Too long. next chunk to header 3");
-//         Console.WriteLine(new string ('-', 20));
-//         var result = Unit.MarkdownHelper.SplitSectionByHeaders(item);
-//         Console.WriteLine(new string ('-', 20));
+builder.Services.AddScoped<NvidiaService>();
+builder.Services.AddScoped<VllmService>();
 
-//     }
-// }
+var app = builder.Build();  
 
 
-// Unit.MarkdownHelper.PrintCountHeader(contentHeader1s, 4);
+
+NvidiaService nvidiaService = app.Services.GetRequiredService<NvidiaService>();
+// VllmService vllmService = app.Services.GetRequiredService<VllmService>();
+var jsonObjectTest = nvidiaService._llmProviderAdapter.CreatejsonChema<Test>();
+string jsonSchema = jsonObjectTest.ToJsonString();
+// Console.WriteLine(jsonSchema);
+string review = "Inception is a really well made film. I rate it four stars out of five.";
+// string prompt = $@"Return the title and the rating based on the following movie review according to this JSON schema {jsonSchema}.
+
+//                 Review: {review}";
+string prompt = $@"Extract the movie title and rating from the following review.
+Review movie: {review}";
+List<ChatMessageRequest> messages = new List<ChatMessageRequest>()
+{
+    new ChatMessageRequest{Role = ChatRole.System, Content = "You are an intelligent AI assistant that helps extract user information into JSON."},
+    new ChatMessageRequest{Role = ChatRole.User, Content = prompt}
+};
+Test res = nvidiaService.ChatWithStructuredJsonSchemaAsync<Test>(messages).Result;
+
+Console.WriteLine(JsonSerializer.Serialize(res));
