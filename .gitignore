@@ -11,4 +11,5 @@ python_code/__pycache__
 
 .env
 
+error_log.txt
 Test.cs
